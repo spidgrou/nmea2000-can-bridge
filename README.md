@@ -215,6 +215,35 @@ This validates:
 - Invalid DLC (15 > 8) → correctly rejected
 - Partial frames spanning multiple reads → buffered until complete
 
+## Why This Bridge?
+
+As of **May 1, 2026**, a thorough search of the SignalK ecosystem and all of GitHub confirms:
+
+**No existing project bridges the Waveshare USB-CAN-A to a virtual CAN interface for SignalK.**
+
+### What SignalK supports natively
+
+SignalK's NMEA 2000 provider (`canbus-canboatjs`) only works with:
+- **SocketCAN interfaces** (`can0`, `vcan0` — PiCAN-M, MCP2515 hats, etc.)
+- **Serial protocol gateways**: Actisense NGT-1/W2K-1, Yacht Devices YDWG-02, Digital Yacht iKonvert, MiniPlex-3-N2K
+
+The Waveshare USB-CAN-A uses a **proprietary 15-byte serial frame protocol** (0xAA/0x55 markers at 2M baud) that doesn't match any of these formats — so SignalK cannot use it directly.
+
+### What others do differently
+
+| Project | Approach | Output | SignalK compatible? |
+|---------|----------|--------|-------------------|
+| **tomer-w/nmea2000** | Reads Waveshare, decodes N2K in Python | **JSON** | No (bypasses canboatjs) |
+| **Python-Class-for-Waveshare-USB-CAN-A** | Raw CAN serial driver | Raw frames | No |
+| **canusbpy** | Serial CAN dump | Terminal output | No |
+| **Our bridge** | Waveshare serial → vcan0 | **SocketCAN** | ✅ Yes |
+
+### What makes this project unique
+
+Our bridge acts as a **translation layer**: it reads the Waveshare's proprietary serial protocol and writes standard CAN frames onto `vcan0`. SignalK's existing canboatjs provider then consumes them exactly as if they came from a physical CAN interface — **no modifications to SignalK required**.
+
+This means you can use a **$18 Waveshare USB-CAN-A** instead of a **€200+ Actisense NGT-1** and get the same result in SignalK.
+
 ## Architecture
 
 ```
