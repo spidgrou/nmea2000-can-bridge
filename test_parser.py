@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Test della logica di parsing di n2k_bridge_v2.py — senza hardware reale."""
+"""Test suite for n2k_bridge_v2.py parser logic — no hardware required."""
 import sys
 sys.path.insert(0, '/home/pi')
 
-# Copia il modulo di test qui sotto, o esegui direttamente:
+# Copy the test module below, or run directly:
 # python3 /tmp/test_n2k_v2.py
 #
-# Test copre:
-# 1. Frame reali (6 frame, PGN diversi) → 6 validi
-# 2. Dati sporchi con falso AA → 1 valido, 1 invalido
-# 3. DLC invalido (15 > 8) → 0 validi, 1 invalido
-# 4. Frame parziale in due chunk → buffer attende poi processa
+# Tests cover:
+# 1. Real frames (6 frames, different PGNs) → 6 valid
+# 2. Dirty data with false AA → 1 valid, 1 invalid
+# 3. Invalid DLC (15 > 8) → 0 valid, 1 invalid
+# 4. Partial frame across two chunks → buffer waits then processes
 
-# Per rieseguire i test dopo modifiche al parser:
+# Re-run tests after parser changes:
 from n2k_bridge_v2 import scan_buffer, Stats
 import can
 
 def run_tests():
-    # Frame reali
+    # Real frames
     real = bytes([
         0xaa,0xe8,0x90,0x01,0xf2,0x09,0xe0,0x1a,0x00,0x00,0x00,0x00,0x00,0x44,0x55,
         0xaa,0xe8,0x90,0x01,0xf2,0x09,0xe1,0x7a,0xff,0xff,0xff,0xff,0xff,0xff,0x55,
@@ -26,13 +26,13 @@ def run_tests():
         0xaa,0xe8,0x90,0x11,0xf0,0x1d,0xe8,0x03,0x01,0xff,0xff,0xff,0xff,0xff,0x55,
         0xaa,0xe8,0x90,0x11,0xf2,0x19,0x00,0x00,0x00,0xff,0xff,0xff,0xff,0xff,0x55,
     ])
-    
+
     s = Stats()
     f = list(scan_buffer(bytearray(real), s))
-    assert len(f) == 6, f"Attesi 6 frame, trovati {len(f)}"
-    print(f"[OK] Frame reali: {len(f)} validi, {s.frames_invalid} invalidi")
-    
-    # Dati sporchi
+    assert len(f) == 6, f"Expected 6 frames, got {len(f)}"
+    print(f"[OK] Real frames: {len(f)} valid, {s.frames_invalid} invalid")
+
+    # Dirty data
     dirty = bytes([
         0xff, 0x00, 0xaa, 0xde, 0xad,
         0xaa,0xe8,0x90,0x01,0xf2,0x09,0xe0,0x1a,0x00,0x00,0x00,0x00,0x00,0x44,0x55,
@@ -40,30 +40,30 @@ def run_tests():
     ])
     s = Stats()
     f = list(scan_buffer(bytearray(dirty), s))
-    assert len(f) == 1, f"Atteso 1 frame valido, trovati {len(f)}"
-    print(f"[OK] Dati sporchi: 1 valido, {s.frames_invalid} invalidi (falso AA)")
-    
-    # DLC invalido
+    assert len(f) == 1, f"Expected 1 valid frame, got {len(f)}"
+    print(f"[OK] Dirty data: 1 valid, {s.frames_invalid} invalid (false AA)")
+
+    # Invalid DLC
     bad_dlc = bytes([0xaa, 0xef, 0x90,0x01,0xf2,0x09] + [0]*8 + [0x55])
     s = Stats()
     f = list(scan_buffer(bytearray(bad_dlc), s))
     assert len(f) == 0
     assert s.frames_invalid == 1
-    print(f"[OK] DLC invalido scartato")
-    
-    # Frame parziale
+    print(f"[OK] Invalid DLC discarded")
+
+    # Partial frame
     s = Stats()
-    buf = bytearray([0xaa,0xe8,0x90,0x01,0xf2,0x09,0xe0,0x1a,0x00,0x00])  # 10/15 byte
+    buf = bytearray([0xaa,0xe8,0x90,0x01,0xf2,0x09,0xe0,0x1a,0x00,0x00])  # 10/15 bytes
     f1 = list(scan_buffer(buf, s))
     assert len(f1) == 0
     assert len(buf) == 10
-    buf.extend([0x00,0x00,0x00,0x44,0x55])  # resto del frame
+    buf.extend([0x00,0x00,0x00,0x44,0x55])  # rest of the frame
     f2 = list(scan_buffer(buf, s))
     assert len(f2) == 1
     assert len(buf) == 0
-    print(f"[OK] Frame parziale: atteso poi processato")
-    
-    print("\nTutti i test superati.")
+    print(f"[OK] Partial frame: waited then processed")
+
+    print("\nAll tests passed.")
 
 if __name__ == "__main__":
     run_tests()
