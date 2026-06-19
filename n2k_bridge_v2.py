@@ -38,6 +38,7 @@ MAX_BUFFER_SIZE = 15000  # Reset buffer if it exceeds this threshold
 CLEAR_TIMEOUT = 10.0     # Reset buffer if no valid frame seen for X seconds
 LOG_INTERVAL = 60        # Print statistics every X seconds
 VERBOSE = True           # Print every frame to stdout
+MAX_CONSECUTIVE_ERRORS = 20  # Auto-recover serial port after this many consecutive errors
 
 # ============================================================
 # STATISTICS
@@ -215,8 +216,9 @@ def main():
     stats = Stats()
     buffer = bytearray()
     last_valid_frame = time.monotonic()
+    consecutive_errors = 0
 
-    print(f"\n=== N2K Bridge v2.0 ===")
+    print(f"\n=== N2K Bridge v2.1 ===")
     print(f"Port:      {SERIAL_PORT} @ {SERIAL_BAUD} baud")
     print(f"CAN:       {CAN_INTERFACE}")
     print(f"Verbose:   {VERBOSE}")
@@ -243,6 +245,8 @@ def main():
     # Main loop
     while running:
         try:
+            consecutive_errors = 0  # Reset on any successful iteration
+
             # 1. Read data from serial
             waiting = ser.in_waiting
             if waiting > 0:
@@ -292,17 +296,56 @@ def main():
 
         except serial.SerialException as e:
             stats.errors += 1
+            consecutive_errors += 1
             print(f"[ERROR] Serial: {e}")
-            time.sleep(2)
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                print(f"[RECOVERY] {consecutive_errors} consecutive errors — re-opening serial port...")
+                try:
+                    ser.close()
+                    time.sleep(2)
+                    ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
+                    print(f"[RECOVERY] Serial re-opened: {ser.portstr}")
+                    consecutive_errors = 0
+                except Exception as re:
+                    print(f"[RECOVERY] Re-open failed: {re}. Retrying on next cycle.")
+                    time.sleep(5)
+            else:
+                time.sleep(2)
         except can.CanError as e:
             stats.errors += 1
+            consecutive_errors += 1
             print(f"[ERROR] CAN: {e}")
-            time.sleep(1)
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                print(f"[RECOVERY] {consecutive_errors} consecutive CAN errors — re-opening serial port...")
+                try:
+                    ser.close()
+                    time.sleep(2)
+                    ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
+                    print(f"[RECOVERY] Serial re-opened: {ser.portstr}")
+                    consecutive_errors = 0
+                except Exception as re:
+                    print(f"[RECOVERY] Re-open failed: {re}. Retrying on next cycle.")
+                    time.sleep(5)
+            else:
+                time.sleep(1)
         except Exception as e:
             stats.errors += 1
+            consecutive_errors += 1
             if VERBOSE:
                 print(f"[ERROR] Generic: {e}", file=sys.stderr)
-            time.sleep(2)
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                print(f"[RECOVERY] {consecutive_errors} consecutive errors — re-opening serial port...")
+                try:
+                    ser.close()
+                    time.sleep(2)
+                    ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
+                    print(f"[RECOVERY] Serial re-opened: {ser.portstr}")
+                    consecutive_errors = 0
+                except Exception as re:
+                    print(f"[RECOVERY] Re-open failed: {re}. Retrying on next cycle.")
+                    time.sleep(5)
+            else:
+                time.sleep(2)
 
     # Clean shutdown
     print("\nShutting down bridge...")
