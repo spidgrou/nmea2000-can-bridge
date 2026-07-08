@@ -24,6 +24,8 @@ import time
 import signal
 import sys
 import os
+import threading
+from collections import deque
 
 # ============================================================
 # CONFIGURATION
@@ -198,8 +200,56 @@ def scan_buffer(buffer, stats):
 
 
 # ============================================================
+# TRANSMISSION
+# ============================================================
+sent_list = deque(maxlen=200)
+sent_list_lock = threading.Lock()
+
+# Record that we sent this
+def mark_sent(arb_id, data):
+    import time as t
+    with sent_list_lock:
+        sent_list.append((t.monotonic(), arb_id, bytes(data)))
+
+# Query did we send this
+def was_sent(arb_id, data, max_age=1.0):
+    import time as t
+    with sent_list_lock:
+        now, b = t.monotonic(), bytes(data)
+        return any((now - t) < max_age and a == arb_id and d == b
+                   for t, a, d in sent_list)
+
+# Convert to waveshare format
+def to_waveshare(msg):
+    dlc = min(len(msg.data), 8)
+    ctrl = (0xE0 if msg.is_extended_id else 0xC0) | dlc
+    id_b = (msg.arbitration_id.to_bytes(4, "little") if msg.is_extended_id
+            else msg.arbitration_id.to_bytes(2, "little"))
+    return bytes([0xAA, ctrl]) + id_b + bytes(msg.data[:dlc]) + bytes([0x55])
+
+# Send it
+def vcan_to_serial(ser_ref, vcan_rx):
+    print("[FWD] vcan->serial thread started (Signal K -> physical bus)")
+    while running:
+        try:
+            msg = vcan_rx.recv(timeout=0.2)
+            if msg is None:
+                continue
+            if was_sent(msg.arbitration_id, msg.data):
+                continue   # skip echo of frames we forwarded from physical bus
+            ser_ref[0].write(to_waveshare(msg))
+            if VERBOSE:
+                pgn = (msg.arbitration_id >> 8) & 0x3FFFF
+                sa  = msg.arbitration_id & 0xFF
+                print(f"  [->BUS] PGN=0x{pgn:04X} SA={sa}  {bytes(msg.data).hex(' ')}")
+        except Exception as exc:
+            if VERBOSE:
+                print(f"[FWD] {exc}", file=sys.stderr)
+
+# ============================================================
 # MAIN LOOP
 # ============================================================
+
 running = True
 
 def signal_handler(sig, frame):
@@ -228,6 +278,12 @@ def main():
     try:
         ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
         print(f"[OK] Serial opened: {ser.portstr}")
+        # Configure USB-CAN-A: variable-length protocol, 250 kbps, extended frame, normal mode
+        cfg = bytes([0xAA,0x55,0x12,0x05,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x19])
+        ser.write(cfg)
+        time.sleep(0.1)
+        ser.reset_input_buffer()
+        print("[OK] USB-CAN-A configured: 250 kbps, extended frame, normal mode")
     except Exception as e:
         print(f"[ERROR] Cannot open {SERIAL_PORT}: {e}")
         sys.exit(1)
@@ -235,6 +291,9 @@ def main():
     try:
         bus = can.interface.Bus(CAN_INTERFACE, bustype='socketcan')
         print(f"[OK] CAN bus opened: {CAN_INTERFACE}")
+        vcan_rx = can.interface.Bus(CAN_INTERFACE, interface='socketcan')
+        ser_ref = [ser]
+        threading.Thread(target=vcan_to_serial, args=(ser_ref, vcan_rx), daemon=True).start()
     except Exception as e:
         print(f"[ERROR] Cannot open {CAN_INTERFACE}: {e}")
         ser.close()
@@ -245,10 +304,9 @@ def main():
     # Main loop
     while running:
         try:
-            consecutive_errors = 0  # Reset on any successful iteration
-
             # 1. Read data from serial
             waiting = ser.in_waiting
+            consecutive_errors = 0  # Reset only after a successful read
             if waiting > 0:
                 data = ser.read(waiting)
                 buffer.extend(data)
@@ -263,6 +321,7 @@ def main():
 
                 # 2. Process complete frames in the buffer
                 for msg in scan_buffer(buffer, stats):
+                    mark_sent(msg.arbitration_id, msg.data)
                     bus.send(msg)
                     stats.frames_valid += 1
 
@@ -304,6 +363,7 @@ def main():
                     ser.close()
                     time.sleep(2)
                     ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
+                    ser_ref[0] = ser
                     print(f"[RECOVERY] Serial re-opened: {ser.portstr}")
                     consecutive_errors = 0
                 except Exception as re:
@@ -321,6 +381,7 @@ def main():
                     ser.close()
                     time.sleep(2)
                     ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
+                    ser_ref[0] = ser
                     print(f"[RECOVERY] Serial re-opened: {ser.portstr}")
                     consecutive_errors = 0
                 except Exception as re:
@@ -339,6 +400,7 @@ def main():
                     ser.close()
                     time.sleep(2)
                     ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=0.1)
+                    ser_ref[0] = ser
                     print(f"[RECOVERY] Serial re-opened: {ser.portstr}")
                     consecutive_errors = 0
                 except Exception as re:
