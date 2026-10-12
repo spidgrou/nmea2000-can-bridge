@@ -122,22 +122,58 @@ python3 n2k_bridge_v2.py
 
 This bridge is designed to feed NMEA 2000 data into SignalK via its `canbus-canboatjs` provider.
 
-### 1. Prerequisites (socketcan)
+### 1. Prerequisites (native CAN socket addon)
 
-SignalK's N2K provider requires the `socketcan` Node.js native module:
+For SocketCAN interfaces (`vcan0`, `can0`), SignalK reads frames through the
+`@canboat/canboatjs` library, which ships its **own native addon** — `canSocket.node` —
+compiled from C++ during installation. Nothing else is needed.
+
+> ⚠️ **The npm package `socketcan` is no longer used. Do not install it.**
+> canboatjs has not depended on it since **3.0 (June 2025)** — the last version to
+> use it was 2.12.3 (21 June 2025). Current canboatjs contains no `require('socketcan')`
+> anywhere, and `signalk-server/node_modules/socketcan/` is **not supposed to exist**.
+> Any guide telling you to `require()` it or `npm rebuild` it is obsolete, including
+> older revisions of this README.
+
+**Check the addon is present:**
 
 ```bash
-# Verify socketcan loads
-node -e "const s = require('/usr/lib/node_modules/signalk-server/node_modules/socketcan'); console.log('OK:', Object.keys(s));"
+ls -l /usr/lib/node_modules/signalk-server/node_modules/@canboat/canboatjs/build/Release/canSocket.node
+grep -m1 '"version"' /usr/lib/node_modules/signalk-server/node_modules/@canboat/canboatjs/package.json
 ```
 
-If it fails with `Module did not self-register`, rebuild it:
+If the file is there, the Node side is done — skip to step 2.
+If it is missing the provider fails with `Failed to load native canSocket module`
+and there is **no fallback path**. Build it manually:
 
 ```bash
-sudo npm rebuild --prefix /usr/lib/node_modules/signalk-server/node_modules/socketcan
+sudo apt install -y build-essential python3
+cd /usr/lib/node_modules/signalk-server/node_modules/@canboat/canboatjs
+sudo npm run install
 ```
 
-> **Important:** Every time Node.js is updated, socketcan must be rebuilt (`sudo npm rebuild`).
+**Why it can be missing on npm 12+:** npm 12 blocks dependency install scripts by
+default (the `allowScripts` policy), and canboatjs builds its addon from a `binding.gyp`
+via `node-gyp rebuild`. During a global install there is no project `package.json`, so
+the package's own `allowScripts` entry does not apply — the documented mechanism for
+global installs is `--allow-scripts`. To install/upgrade SignalK with the addon built:
+
+```bash
+sudo npm install -g --allow-scripts=@canboat/canboatjs signalk-server@latest
+# and to keep it working on future upgrades:
+npm config set allow-scripts=@canboat/canboatjs --location=user
+```
+
+**Functional test** — a bare `require()` only proves the JS wrapper loads, so create a
+real CAN channel instead (works with the bridge running or stopped):
+
+```bash
+node -e "const {CanChannel}=require('/usr/lib/node_modules/signalk-server/node_modules/@canboat/canboatjs/dist/canSocket.js'); const ch=new CanChannel('vcan0'); ch.start(); console.log('CAN OK'); setTimeout(()=>{ch.stop();process.exit(0)},2000)"
+```
+
+`CAN OK` means the native layer is working. (Being N-API based, this addon is
+ABI-stable: it does **not** need rebuilding every time Node.js is updated, unlike
+the old `socketcan` module.)
 
 ### 2. SignalK Provider Configuration
 
@@ -164,9 +200,14 @@ Edit `/home/pi/.signalk/settings.json` (or your SignalK config path) and add thi
 
 ### 3. Verify Data Flow
 
+Verify from the bottom up — if `vcan0` is empty there is nothing for SignalK to read,
+and the problem is upstream of the provider.
+
 ```bash
-# Check frames on vcan0
-candump -x vcan0
+# Step 0 — the bridge and vcan0: are frames reaching the virtual interface?
+ip link show vcan0          # must exist and be UP
+candump -x vcan0            # frames from the bridge (apt install can-utils)
+# If this is empty, fix the bridge first — SignalK cannot do anything about it.
 
 # Check that SignalK sees the N2K source
 curl -s http://localhost:3000/signalk/v1/api/sources | python3 -m json.tool
@@ -175,6 +216,43 @@ curl -s http://localhost:3000/signalk/v1/api/sources | python3 -m json.tool
 # Check NMEA 2000 data
 curl -s http://localhost:3000/signalk/v1/api/ | python3 -m json.tool
 ```
+
+If the source is missing, look at the provider's own error first:
+
+```bash
+journalctl -u signalk --no-pager | grep -i "canSocket\|unable to open can\|socketcan" | tail
+```
+
+### 4. Troubleshooting
+
+**`Cannot find module '.../signalk-server/node_modules/socketcan'`**
+Nothing is broken. That module is obsolete (see step 1) and it is normal for the
+folder not to exist. The only case where `socketcan` is still required is
+canboatjs 2.x — check the version as shown in step 1: if it reports `2.x`, your
+SignalK predates June 2025 and is better off updated to a current release.
+
+**`Cannot find module '../build/Release/can.node'`**
+This is the signature of a hand-installed `socketcan` whose install script was blocked
+by npm (npm 12 blocks dependency install scripts by default), so the module was left
+without its compiled binary. Remove it — it cannot help, because canboatjs never loads it:
+
+```bash
+sudo rm -rf /usr/lib/node_modules/signalk-server/node_modules/socketcan
+```
+
+Installing `socketcan` by hand inside SignalK's `node_modules` also drags in hundreds of
+unrelated packages. Avoid it.
+
+**`Failed to load native canSocket module`**
+The native addon in step 1 is missing or not loadable — build it as shown there
+(`sudo npm run install` inside the `@canboat/canboatjs` folder, then restart SignalK).
+On npm 12+, a fresh `sudo npm install -g signalk-server` skips that build unless
+`--allow-scripts=@canboat/canboatjs` is passed.
+
+**`candump` reports `vcan0: No such device`**
+The virtual interface was not created (or was lost on reboot): `sudo ip link add vcan0
+type vcan && sudo ip link set vcan0 up`, and make it persistent — see the systemd unit
+below or add the two commands to `/etc/rc.local`.
 
 ## Running as a Service (systemd)
 
