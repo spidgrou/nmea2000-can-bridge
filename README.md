@@ -119,9 +119,14 @@ sudo ip link set vcan0 up
 #### Persist vcan0 across reboots (systemd unit)
 
 `vcan0` is a virtual interface: it does **not** survive a reboot, and a bridge that starts
-before it exists has nothing to write to. Do **not** rely on `/etc/rc.local` — on Debian
-11/12/13 that file is not executed unless you also create and enable `rc-local.service`
-(a common trap: you add the commands, reboot, and nothing happens).
+before it exists has nothing to write to.
+
+Do **not** rely on `/etc/rc.local`. It still works on Debian — `systemd-rc-local-generator`
+pulls `rc-local.service` into the boot process **if `/etc/rc.local` exists and is
+executable** — but that is exactly where people get stuck: a file without `chmod +x`, or
+without a `#!/bin/sh` shebang and a final `exit 0`, is silently ignored (you add the
+commands, reboot, and nothing happens). systemd's own documentation recommends replacing
+it with proper unit files.
 
 Use a dedicated oneshot unit instead: one file, it works with any network manager
 (NetworkManager, systemd-networkd), and it fails loudly if something is wrong.
@@ -147,8 +152,8 @@ WantedBy=multi-user.target
 ```
 
 The `-` before the `ip link add` line means “an interface that already exists is fine”: on a
-re-run (or when vcan0 is already up) that command answers `Operation not permitted` /
-`File exists`, which would otherwise mark the whole unit as failed.
+re-run (or when vcan0 is already up) that command answers `RTNETLINK answers: File exists`
+(exit 2), which would otherwise mark the whole unit as failed.
 
 Enable it and check it really came up:
 
@@ -315,9 +320,11 @@ On npm 12+, a fresh `sudo npm install -g signalk-server` skips that build unless
 
 **`candump` reports `vcan0: No such device`, or the provider log shows `bind() to 'vcan0': No such device`**
 The virtual interface was not created, or it was lost on reboot — see *Persist vcan0 across
-reboots* above and install the systemd unit (not `/etc/rc.local`).
-SignalK retries the interface every 5 seconds, so it recovers on its own once `vcan0`
-exists: no restart needed.
+reboots* above and install the systemd unit (`/etc/rc.local` only runs when the file is
+executable, which is easy to get wrong).
+The provider retries every 5 seconds — that repetition is visible in the log — so it should
+pick the interface up as soon as `vcan0` exists, without a SignalK restart: watch for the
+retries to stop, and confirm with a real frame (see the bench test in step 3).
 
 ## Running as a Service (systemd)
 
