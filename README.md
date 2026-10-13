@@ -100,15 +100,69 @@ The Waveshare USB-CAN-A uses a **variable-length serial protocol** over USB virt
 ```bash
 # Python packages
 pip install pyserial python-can
+```
 
-# Virtual CAN interface (kernel module)
-sudo modprobe can
+`candump` (used throughout this guide) comes with `can-utils`:
+
+```bash
+sudo apt install can-utils
+```
+
+#### Create vcan0 (manually, for a quick test)
+
+```bash
 sudo modprobe vcan
-
-# Create vcan0 (add to /etc/rc.local or systemd for persistence)
 sudo ip link add vcan0 type vcan
 sudo ip link set vcan0 up
 ```
+
+#### Persist vcan0 across reboots (systemd unit)
+
+`vcan0` is a virtual interface: it does **not** survive a reboot, and a bridge that starts
+before it exists has nothing to write to. Do **not** rely on `/etc/rc.local` — on Debian
+11/12/13 that file is not executed unless you also create and enable `rc-local.service`
+(a common trap: you add the commands, reboot, and nothing happens).
+
+Use a dedicated oneshot unit instead: one file, it works with any network manager
+(NetworkManager, systemd-networkd), and it fails loudly if something is wrong.
+
+Create `/etc/systemd/system/vcan0.service`:
+
+```ini
+[Unit]
+Description=Virtual CAN interface vcan0 (NMEA 2000 bridge)
+After=network.target
+Before=signalk.service n2k-bridge.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/sbin/modprobe vcan
+ExecStart=-/usr/sbin/ip link add vcan0 type vcan
+ExecStart=/usr/sbin/ip link set vcan0 up
+ExecStop=/usr/sbin/ip link delete vcan0
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The `-` before the `ip link add` line means “an interface that already exists is fine”: on a
+re-run (or when vcan0 is already up) that command answers `Operation not permitted` /
+`File exists`, which would otherwise mark the whole unit as failed.
+
+Enable it and check it really came up:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now vcan0.service
+systemctl status vcan0.service     # active (exited) = interface ready
+ip link show vcan0                 # <NOARP,UP,LOWER_UP>
+```
+
+> **Alternative** — if your system already runs **systemd-networkd**, two files do the same
+> job: `/etc/systemd/network/80-vcan0.netdev` (`[NetDev]` / `Name=vcan0` / `Kind=vcan`)
+> and `/etc/systemd/network/80-vcan0.network` (`[Match] Name=vcan0` plus an empty
+> `[Network]` section). Do not use both approaches at once.
 
 ### Clone & Run
 
@@ -221,7 +275,17 @@ If the source is missing, look at the provider's own error first:
 
 ```bash
 journalctl -u signalk --no-pager | grep -i "canSocket\|unable to open can\|socketcan" | tail
+# or, to see the message that sits above the stack trace:
+journalctl -u signalk --no-pager -o cat | grep -B6 "at new CanChannel" | tail -20
 ```
+
+**An empty `candump` while the bridge is running is normal on a bench setup.** Frames on
+`vcan0` come from the bridge only, and the bridge forwards what the adapter hears on a
+live, powered N2K backbone: with no N2K device connected there is simply nothing to
+forward. What can be verified without a bus is that the bridge service is running, that it
+found its serial port, and that SignalK opens the interface without errors
+(`ip link show vcan0`, `systemctl status n2k-bridge`, and the `CanChannel('vcan0')` test
+from step 1).
 
 ### 4. Troubleshooting
 
@@ -249,10 +313,11 @@ The native addon in step 1 is missing or not loadable — build it as shown ther
 On npm 12+, a fresh `sudo npm install -g signalk-server` skips that build unless
 `--allow-scripts=@canboat/canboatjs` is passed.
 
-**`candump` reports `vcan0: No such device`**
-The virtual interface was not created (or was lost on reboot): `sudo ip link add vcan0
-type vcan && sudo ip link set vcan0 up`, and make it persistent — see the systemd unit
-below or add the two commands to `/etc/rc.local`.
+**`candump` reports `vcan0: No such device`, or the provider log shows `bind() to 'vcan0': No such device`**
+The virtual interface was not created, or it was lost on reboot — see *Persist vcan0 across
+reboots* above and install the systemd unit (not `/etc/rc.local`).
+SignalK retries the interface every 5 seconds, so it recovers on its own once `vcan0`
+exists: no restart needed.
 
 ## Running as a Service (systemd)
 
